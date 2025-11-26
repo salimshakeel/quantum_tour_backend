@@ -206,7 +206,9 @@ def poll_runway_status(task_id: str, max_checks: int = 30, interval_seconds: int
 
                 video.status = "succeeded"
                 file_name = f"video_{video.id}.mp4"
-                dropbox_like_path = f"/videos/{user_folder}/{file_name}" if user_folder else f"/videos/{file_name}"
+                dropbox_like_path = (
+                    f"/quantumtour/videos/{user_folder}/{file_name}" if user_folder else f"/quantumtour/videos/{file_name}"
+                )
                 video.video_url = f"dropbox://{dropbox_like_path}"
                 db.commit()
                 try:
@@ -246,7 +248,9 @@ def poll_runway_status(task_id: str, max_checks: int = 30, interval_seconds: int
                             user_folder = ""
 
                         file_name = f"video_{video.id}.mp4"
-                        dropbox_path = f"/videos/{user_folder}/{file_name}" if user_folder else f"/videos/{file_name}"
+                        dropbox_path = (
+                            f"/quantumtour/videos/{user_folder}/{file_name}" if user_folder else f"/quantumtour/videos/{file_name}"
+                        )
                         try:
                             if upload_video_to_dropbox(output_url, dropbox_path):
                                 final_url = f"dropbox://{dropbox_path}"
@@ -487,7 +491,9 @@ def process_videos_for_order(order_id: int, file_paths: list, reorder_user_id: O
                     file_name = (
                         f"reorder_{reorder_user_id}_{img_row.id}.mp4" if reorder_user_id else f"video_{img_row.id}.mp4"
                     )
-                    dropbox_path = f"/videos/{user_folder}/{file_name}" if user_folder else f"/videos/{file_name}"
+                    dropbox_path = (
+                        f"/quantumtour/videos/{user_folder}/{file_name}" if user_folder else f"/quantumtour/videos/{file_name}"
+                    )
                     upload_success = upload_video_to_dropbox(video_url, dropbox_path)
 
                     if upload_success:
@@ -600,7 +606,7 @@ async def upload_photos(
 
                 # Upload to Dropbox immediately
                 dropbox_path = (
-                    f"/images/{user_folder}/{file.filename}" if user_folder else f"/images/{file.filename}"
+                    f"/quantumtour/images/{user_folder}/{file.filename}" if user_folder else f"/quantumtour/images/{file.filename}"
                 )
                 upload_success = upload_image_to_dropbox(dst_path, dropbox_path)
                 if upload_success:
