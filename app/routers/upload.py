@@ -561,16 +561,16 @@ async def upload_photos(
 ):
     print("[UPLOAD] Endpoint called ✅")
 
-    # if package not in PACKAGE_LIMITS:
-    #     raise HTTPException(status_code=400, detail="Invalid package selected")
+    if package not in PACKAGE_LIMITS:
+        raise HTTPException(status_code=400, detail="Invalid package selected")
 
-    # # ✅ Validate number of files
-    # min_files, max_files = PACKAGE_LIMITS[package]
-    # if not (min_files <= len(files) <= max_files):
-    #     raise HTTPException(
-    #         status_code=400,
-    #         detail=f"{package} allows {min_files}-{max_files} photos"
-    #     )
+    # ✅ Validate number of files
+    min_files, max_files = PACKAGE_LIMITS[package]
+    if not (min_files <= len(files) <= max_files):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{package} allows {min_files}-{max_files} photos"
+        )
 
     db = SessionLocal()
     try:
@@ -608,11 +608,9 @@ async def upload_photos(
                 dropbox_path = (
                     f"/quantumtour/images/{user_folder}/{file.filename}" if user_folder else f"/quantumtour/images/{file.filename}"
                 )
-                upload_success = upload_image_to_dropbox(dst_path, dropbox_path)
-                if upload_success:
-                    print(f"[OK] Image also uploaded to Dropbox: {dropbox_path}")
-                else:
-                    print(f"[WARN] Failed to upload {file.filename} to Dropbox")
+                # Queue Dropbox upload in background to return response faster
+                background_tasks.add_task(upload_image_to_dropbox, dst_path, dropbox_path)
+                print(f"[BG] Scheduled Dropbox upload → {dropbox_path}")
 
             except Exception as e:
                 print(f"[ERROR] Could not save {file.filename}: {e}")
