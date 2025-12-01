@@ -5,7 +5,7 @@ from typing import List, Optional
 from datetime import datetime
 import shutil, os
 from app.routers.auth import get_current_user
-from app.routers.upload import IMAGES_DIR, process_videos_for_order
+from app.routers.upload import IMAGES_DIR, process_videos_for_order, slugify_path_component
 from app.config import STRIPE_SECRET_KEY
 import stripe
 stripe.api_key = STRIPE_SECRET_KEY
@@ -458,7 +458,7 @@ load_dotenv()
 DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
 DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
-DROPBOX_FOLDER_PATH = "/brand_assets"
+DROPBOX_FOLDER_PATH = "/quantumtour/brand_assets"
 
 
 
@@ -478,27 +478,56 @@ def get_dropbox_access_token():
     return response.json()["access_token"]
 
 @router.post("/brand_assets")
-async def upload_brand_asset(file: UploadFile = File(...)):
+async def upload_brand_asset(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
     """
     Upload a brand logo to Dropbox and return the shareable URL.
     """
     try:
-        # Generate a fresh access token
-        access_token = get_dropbox_access_token()
-        dbx = dropbox.Dropbox(access_token)
+        # Initialize Dropbox client using refresh token (long-lived)
+        if not all([DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN]):
+            raise HTTPException(status_code=500, detail="Missing Dropbox credentials in environment")
+        dbx = dropbox.Dropbox(
+            app_key=DROPBOX_APP_KEY,
+            app_secret=DROPBOX_APP_SECRET,
+            oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
+        )
 
-        dropbox_path = f"{DROPBOX_FOLDER_PATH}/{file.filename}"
+        # Build client folder from user's name/email
+        display = current_user.name or current_user.email or f"user_{current_user.id}"
+        user_folder = slugify_path_component(display)
+        dropbox_path = f"{DROPBOX_FOLDER_PATH}/{user_folder}/{file.filename}"
+
+        # Ensure destination folder exists: /quantumtour/brand_assets and then client subfolder
+        try:
+            base_folder = DROPBOX_FOLDER_PATH  # /quantumtour/brand_assets
+            dbx.files_create_folder_v2(base_folder)
+        except dropbox.exceptions.ApiError:
+            pass  # likely exists
+        try:
+            folder_path = f"{DROPBOX_FOLDER_PATH}/{user_folder}"
+            dbx.files_create_folder_v2(folder_path)
+        except dropbox.exceptions.ApiError:
+            pass  # likely exists
 
         # Upload the file
-        dbx.files_upload(file.file.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+        file_bytes = file.file.read()
+        dbx.files_upload(file_bytes, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
 
-        # Create a shareable link
-        shared_link = dbx.sharing_create_shared_link_with_settings(dropbox_path).url
-        public_url = shared_link.replace("?dl=0", "?dl=1")
+        # Obtain a temporary link (does not require sharing scopes)
+        public_url = None
+        try:
+            tmp = dbx.files_get_temporary_link(dropbox_path)
+            public_url = tmp.link
+        except dropbox.exceptions.ApiError:
+            public_url = None
 
         return {
             "message": "✅ Brand asset uploaded successfully!",
             "file_name": file.filename,
+            "dropbox_path": dropbox_path,
             "dropbox_url": public_url,
             "uploaded_at": datetime.utcnow().isoformat()
         }
