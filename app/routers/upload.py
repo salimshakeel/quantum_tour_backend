@@ -8,6 +8,7 @@ import dropbox
 import json
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form, Depends
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import OperationalError
 from PIL import Image
 from dotenv import load_dotenv
 from typing import List, Optional
@@ -19,6 +20,7 @@ from fastapi import Request
 import logging
 import time
 import re
+import threading
 from app.models.database import SessionLocal, UploadedImage, Video, Feedback, Order, Notification, User
 from app.routers.auth import get_current_user
 from app.services.prompt_generator import (
@@ -26,9 +28,29 @@ from app.services.prompt_generator import (
     improve_prompt_with_feedback,
 )
 PACKAGE_LIMITS = {
+    # Frontend package names
+    "Express": (5, 10),
+    "Quick": (11, 20),
+    "Standered": (21, 30),  # keep UI spelling
+    "Pro": (21, 30),
+    "Ultra": (21, 30),
+    # Backwards-compatible old names
     "Starter": (5, 10),
     "Professional": (11, 20),
-    "Premium": (21, 30)
+    "Premium": (21, 30),
+}
+
+# Accept common variants/casing
+PACKAGE_ALIASES = {
+    "express": "Express",
+    "quick": "Quick",
+    "standered": "Standered",
+    "standard": "Standered",  # alias to UI spelling
+    "pro": "Pro",
+    "ultra": "Ultra",
+    "starter": "Starter",
+    "professional": "Professional",
+    "premium": "Premium",
 }
 
 # ----------------------- SETUP -----------------------
@@ -223,22 +245,34 @@ def poll_runway_status(task_id: str, max_checks: int = 30, interval_seconds: int
                 except Exception:
                     user_folder = ""
 
-                video.status = "succeeded"
-                file_name = f"video_{video.id}.mp4"
-                dropbox_like_path = (
-                    f"/quantumtour/{user_folder}/video output/{file_name}" if user_folder else f"/quantumtour/video output/{file_name}"
-                )
-                video.video_url = f"dropbox://{dropbox_like_path}"
-                db.commit()
-                try:
-                    create_notification(
-                        db=db,
-                        user_id=getattr(video, "user_id", None),
-                        type_="video_created",
-                        message=f"Video #{video.id} succeeded (mock job {task_id})"
+                # Skip if already terminal to avoid duplicates
+                if str(video.status).lower() == "succeeded":
+                    logger.info(f"[MOCK] Task {task_id} already succeeded for Video {video.id}; skipping duplicate update")
+                else:
+                    video.status = "succeeded"
+                    file_name = f"video_{video.id}.mp4"
+                    dropbox_like_path = (
+                        f"/quantumtour/{user_folder}/video output/{file_name}" if user_folder else f"/quantumtour/video output/{file_name}"
                     )
-                except Exception as notify_err:
-                    logger.error(f"Failed to create notification (mock): {notify_err}")
+                    video.video_url = f"dropbox://{dropbox_like_path}"
+                    db.commit()
+                    try:
+                        # Deduplicate notification by (user_id,type,message)
+                        msg = f"Video #{video.id} succeeded (mock job {task_id})"
+                        existing = db.query(Notification).filter(
+                            Notification.user_id == getattr(video, "user_id", None),
+                            Notification.type == "video_created",
+                            Notification.message == msg,
+                        ).first()
+                        if not existing:
+                            create_notification(
+                                db=db,
+                                user_id=getattr(video, "user_id", None),
+                                type_="video_created",
+                                message=msg
+                            )
+                    except Exception as notify_err:
+                        logger.error(f"Failed to create notification (mock): {notify_err}")
             logger.info(f"[MOCK] Poll complete for task {task_id}")
             return
 
@@ -253,6 +287,10 @@ def poll_runway_status(task_id: str, max_checks: int = 30, interval_seconds: int
                 output_url = _extract_output_url_from_task_payload(payload)
 
                 if video:
+                    # Avoid duplicate success handling
+                    if str(video.status).lower() == "succeeded":
+                        logger.info(f"Runway task {task_id} already marked succeeded for Video {video.id}; skipping")
+                        return
                     # Prefer Dropbox upload; if it fails, keep the original URL
                     final_url = output_url
                     if output_url:
@@ -283,12 +321,19 @@ def poll_runway_status(task_id: str, max_checks: int = 30, interval_seconds: int
                     db.commit()
 
                     try:
-                        create_notification(
-                            db=db,
-                            user_id=getattr(video, "user_id", None),
-                            type_="video_created",
-                            message=f"Video #{video.id} succeeded (job {task_id})"
-                        )
+                        msg = f"Video #{video.id} succeeded (job {task_id})"
+                        existing = db.query(Notification).filter(
+                            Notification.user_id == getattr(video, "user_id", None),
+                            Notification.type == "video_created",
+                            Notification.message == msg,
+                        ).first()
+                        if not existing:
+                            create_notification(
+                                db=db,
+                                user_id=getattr(video, "user_id", None),
+                                type_="video_created",
+                                message=msg
+                            )
                     except Exception as notify_err:
                         logger.error(f"Failed to create success notification: {notify_err}")
 
@@ -297,17 +342,28 @@ def poll_runway_status(task_id: str, max_checks: int = 30, interval_seconds: int
 
             if status == "FAILED":
                 if video:
-                    video.status = "failed"
-                    db.commit()
-                    try:
-                        create_notification(
-                            db=db,
-                            user_id=getattr(video, "user_id", None),
-                            type_="video_failed",
-                            message=f"Video #{video.id} failed (job {task_id})"
-                        )
-                    except Exception as notify_err:
-                        logger.error(f"Failed to create failure notification: {notify_err}")
+                    # Avoid duplicate failure handling
+                    if str(video.status).lower() == "failed":
+                        logger.info(f"Runway task {task_id} already marked failed for Video {video.id}; skipping")
+                    else:
+                        video.status = "failed"
+                        db.commit()
+                        try:
+                            msg = f"Video #{video.id} failed (job {task_id})"
+                            existing = db.query(Notification).filter(
+                                Notification.user_id == getattr(video, "user_id", None),
+                                Notification.type == "video_failed",
+                                Notification.message == msg,
+                            ).first()
+                            if not existing:
+                                create_notification(
+                                    db=db,
+                                    user_id=getattr(video, "user_id", None),
+                                    type_="video_failed",
+                                    message=msg
+                                )
+                        except Exception as notify_err:
+                            logger.error(f"Failed to create failure notification: {notify_err}")
 
                 logger.warning(f"❌ Runway task {task_id} FAILED")
                 return
@@ -431,29 +487,32 @@ def upload_image_to_dropbox(image_path: str, dropbox_path: str) -> bool:
 # ----------------------- UPLOAD (MULTI) -----------------------
 def process_videos_for_order(order_id: int, file_paths: list, reorder_user_id: Optional[int] = None):
     print(f"[BG] Start processing order {order_id} with {len(file_paths)} files")
-    db: Session = SessionLocal()
+    # Precompute user context with a short-lived session
+    ctx_db: Session = SessionLocal()
     try:
-        order = db.query(Order).filter(Order.id == order_id).first()
+        order = ctx_db.query(Order).filter(Order.id == order_id).first()
         if not order:
             print(f"[ERROR] Order {order_id} not found")
             return
 
-        # Resolve a user once per order if possible
-        resolved_user_id = resolve_user_for_order(db, order)
+        resolved_user_id = resolve_user_for_order(ctx_db, order)
 
-        # Build per-user folder for Dropbox videos
         user_folder = ""
         try:
             if resolved_user_id:
-                user = db.query(User).filter(User.id == resolved_user_id).first()
+                user = ctx_db.query(User).filter(User.id == resolved_user_id).first()
                 display = (
                     (user.email.split("@")[0]) if (user and getattr(user, "email", None)) else (user.name or f"user_{user.id}")
                 ) if user else None
                 user_folder = build_agent_folder_name(display)
         except Exception:
             user_folder = ""
+    finally:
+        ctx_db.close()
 
-        for src_path in file_paths:
+    for src_path in file_paths:
+        db: Session = SessionLocal()
+        try:
             filename = os.path.basename(src_path)
             try:
                 print(f"[STEP] Opening image → {src_path}")
@@ -475,13 +534,24 @@ def process_videos_for_order(order_id: int, file_paths: list, reorder_user_id: O
                 upload_time=datetime.utcnow(),
             )
             db.add(img_row)
-            db.commit()
-            db.refresh(img_row)
+            try:
+                db.commit()
+                db.refresh(img_row)
+            except OperationalError:
+                print("[DB] Connection dropped during commit; retrying once with new session…")
+                db.rollback(); db.close()
+                db = SessionLocal()
+                db.add(img_row)
+                db.commit(); db.refresh(img_row)
 
             print(f"[STEP] Generating cinematic prompt for {filename}")
             prompt_text = generate_cinematic_prompt_from_image(src_path)
             img_row.prompt = prompt_text
-            db.commit()
+            try:
+                db.commit()
+            except OperationalError:
+                db.rollback()
+                print("[DB] Commit failed; continuing (prompt saved later if needed)")
 
             ratio = "1280:720" if w >= h else "720:1280"
             opt_path = optimize_image_for_runway(src_path)
@@ -493,42 +563,28 @@ def process_videos_for_order(order_id: int, file_paths: list, reorder_user_id: O
             print(f"[RUNWAY] mock={USE_MOCK_RUNWAY} key_present={bool(RUNWAY_API_KEY)} model={RUNWAY_MODEL}")
             if USE_MOCK_RUNWAY:
                 video_filename = f"mock_{img_row.id}.mp4"
-                video_url, task_id, status = None, f"mock-job-{int(datetime.utcnow().timestamp())}", "succeeded"
+                task_id, status, video_url = f"mock-job-{int(datetime.utcnow().timestamp())}", "succeeded", None
             else:
                 try:
                     print(f"[STEP] Sending request to RunwayML for {filename}")
                     sdk = get_runway_client()
+                    # Kick off job without waiting so we can process in parallel
                     task = sdk.image_to_video.create(
                         model=RUNWAY_MODEL,
                         prompt_image=data_url,
                         prompt_text=prompt_text,
                         duration=5,
                         ratio=ratio,
-                    ).wait_for_task_output()
-
-                    if not task.output:
-                        raise Exception("RunwayML did not return a video")
-
-                    video_url = task.output[0]
-                    task_id = task.id
-                    status = "succeeded"
-                    # Build filename and path inside optional per-user folder
-                    file_name = (
-                        f"reorder_{reorder_user_id}_{img_row.id}.mp4" if reorder_user_id else f"video_{img_row.id}.mp4"
                     )
-                    dropbox_path = (
-                        f"/quantumtour/{user_folder}/video output/{file_name}" if user_folder else f"/quantumtour/video output/{file_name}"
-                    )
-                    upload_success = upload_video_to_dropbox(video_url, dropbox_path)
-
-                    if upload_success:
-                        video_url = f"dropbox://{dropbox_path}"
-                    else:
-                        video_url = None
-                        status = "failed"
-
+                    task_id = getattr(task, "id", None) or getattr(task, "task_id", None)
+                    if not task_id:
+                        raise Exception("RunwayML did not return a task id")
+                    status, video_url = "processing", None
+                    # Start a background poller for this task id
+                    threading.Thread(target=poll_runway_status, args=(task_id,), kwargs={}, daemon=True).start()
+                    print(f"[RUNWAY] queued task_id={task_id} for image {img_row.id}")
                 except Exception as e:
-                    print(f"[ERROR] RunwayML generation failed: {e}")
+                    print(f"[ERROR] RunwayML enqueue failed: {e}")
                     status, video_url, task_id = "failed", None, None
 
             # Save Video row
@@ -542,13 +598,24 @@ def process_videos_for_order(order_id: int, file_paths: list, reorder_user_id: O
                 iteration=1,
             )
             db.add(video_row)
-            db.commit()
-            db.refresh(video_row)
+            try:
+                db.commit()
+                db.refresh(video_row)
+            except OperationalError:
+                print("[DB] Connection dropped during video save; retrying…")
+                db.rollback(); db.close()
+                db = SessionLocal()
+                db.add(video_row)
+                db.commit(); db.refresh(video_row)
 
             # Update UploadedImage with video info
             img_row.video_url = video_url
             img_row.video_generated_at = datetime.utcnow()
-            db.commit()
+            try:
+                db.commit()
+            except OperationalError:
+                db.rollback()
+                print("[DB] Commit failed when updating image with video info; skipping")
 
             if video_row.status == "succeeded":
                 create_notification(
@@ -557,7 +624,7 @@ def process_videos_for_order(order_id: int, file_paths: list, reorder_user_id: O
                     type_="video_created",
                     message=f"Video #{video_row.id} created for Order #{order.id} ({filename})"
                 )
-            else:
+            elif video_row.status == "failed":
                 create_notification(
                     db=db,
                     user_id=resolved_user_id,
@@ -571,9 +638,10 @@ def process_videos_for_order(order_id: int, file_paths: list, reorder_user_id: O
                 except Exception:
                     pass
 
-        print(f"[OK] Finished background processing for order {order_id}")
-    finally:
-        db.close()
+        finally:
+            db.close()
+
+    print(f"[OK] Finished background processing for order {order_id}")
         
 
 @router.post("/upload")
@@ -586,11 +654,13 @@ async def upload_photos(
 ):
     print("[UPLOAD] Endpoint called ✅")
 
-    # if package not in PACKAGE_LIMITS:
-    #     raise HTTPException(status_code=400, detail="Invalid package selected")
+    normalized_package = PACKAGE_ALIASES.get((package or "").strip().lower())
+    if not normalized_package or normalized_package not in PACKAGE_LIMITS:
+        allowed = ", ".join(sorted({v for v in PACKAGE_ALIASES.values()}))
+        raise HTTPException(status_code=400, detail=f"Invalid package selected. Allowed: {allowed}")
 
     # # ✅ Validate number of files
-    # min_files, max_files = PACKAGE_LIMITS[package]
+    # min_files, max_files = PACKAGE_LIMITS[normalized_package]
     # if not (min_files <= len(files) <= max_files):
     #     raise HTTPException(
     #         status_code=400,
@@ -601,7 +671,7 @@ async def upload_photos(
     try:
         # Create a new order
         order = Order(
-            package=package,
+            package=normalized_package,
             add_ons=add_ons,
             user_id=(current_user.id if current_user else None)
         )
@@ -710,33 +780,55 @@ async def runwayml_webhook(request: Request):
                 return {"status": "ok"}
 
             if status == "succeeded":
-                video.status = "succeeded"
-                if output_url:
-                    video.video_url = output_url
-                db.commit()
-                try:
-                    create_notification(
-                        db=db,
-                        user_id=video.user_id,
-                        type_="video_created",
-                        message=f"Video #{video.id} succeeded (job {job_id})"
-                    )
-                except Exception as notify_err:
-                    logger.error(f"Failed to create success notification: {notify_err}")
-                logger.info(f"✅ Runway job {job_id} mapped to Video {video.id} marked succeeded")
+                # Skip if already marked succeeded
+                if str(video.status).lower() == "succeeded":
+                    logger.info(f"Webhook: job {job_id} already succeeded for Video {video.id}; skipping duplicate")
+                else:
+                    video.status = "succeeded"
+                    if output_url:
+                        video.video_url = output_url
+                    db.commit()
+                    try:
+                        msg = f"Video #{video.id} succeeded (job {job_id})"
+                        existing = db.query(Notification).filter(
+                            Notification.user_id == video.user_id,
+                            Notification.type == "video_created",
+                            Notification.message == msg,
+                        ).first()
+                        if not existing:
+                            create_notification(
+                                db=db,
+                                user_id=video.user_id,
+                                type_="video_created",
+                                message=msg
+                            )
+                    except Exception as notify_err:
+                        logger.error(f"Failed to create success notification: {notify_err}")
+                    logger.info(f"✅ Runway job {job_id} mapped to Video {video.id} marked succeeded")
             elif status == "failed":
-                video.status = "failed"
-                db.commit()
-                try:
-                    create_notification(
-                        db=db,
-                        user_id=video.user_id,
-                        type_="video_failed",
-                        message=f"Video #{video.id} failed (job {job_id})"
-                    )
-                except Exception as notify_err:
-                    logger.error(f"Failed to create failure notification: {notify_err}")
-                logger.warning(f"❌ Runway job {job_id} mapped to Video {video.id} marked failed")
+                # Skip if already marked failed
+                if str(video.status).lower() == "failed":
+                    logger.info(f"Webhook: job {job_id} already failed for Video {video.id}; skipping duplicate")
+                else:
+                    video.status = "failed"
+                    db.commit()
+                    try:
+                        msg = f"Video #{video.id} failed (job {job_id})"
+                        existing = db.query(Notification).filter(
+                            Notification.user_id == video.user_id,
+                            Notification.type == "video_failed",
+                            Notification.message == msg,
+                        ).first()
+                        if not existing:
+                            create_notification(
+                                db=db,
+                                user_id=video.user_id,
+                                type_="video_failed",
+                                message=msg
+                            )
+                    except Exception as notify_err:
+                        logger.error(f"Failed to create failure notification: {notify_err}")
+                    logger.warning(f"❌ Runway job {job_id} mapped to Video {video.id} marked failed")
             else:
                 # Update status if provided (e.g., 'processing') without notifications
                 if status:
