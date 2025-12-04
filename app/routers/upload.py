@@ -26,9 +26,29 @@ from app.services.prompt_generator import (
     improve_prompt_with_feedback,
 )
 PACKAGE_LIMITS = {
+    # Frontend package names
+    "Express": (5, 10),
+    "Quick": (11, 20),
+    "Standered": (21, 30),  # keep UI spelling
+    "Pro": (21, 30),
+    "Ultra": (21, 30),
+    # Backwards-compatible old names
     "Starter": (5, 10),
     "Professional": (11, 20),
-    "Premium": (21, 30)
+    "Premium": (21, 30),
+}
+
+# Accept common variants/casing
+PACKAGE_ALIASES = {
+    "express": "Express",
+    "quick": "Quick",
+    "standered": "Standered",
+    "standard": "Standered",  # alias to UI spelling
+    "pro": "Pro",
+    "ultra": "Ultra",
+    "starter": "Starter",
+    "professional": "Professional",
+    "premium": "Premium",
 }
 
 # ----------------------- SETUP -----------------------
@@ -586,11 +606,13 @@ async def upload_photos(
 ):
     print("[UPLOAD] Endpoint called ✅")
 
-    if package not in PACKAGE_LIMITS:
-        raise HTTPException(status_code=400, detail="Invalid package selected")
+    normalized_package = PACKAGE_ALIASES.get((package or "").strip().lower())
+    if not normalized_package or normalized_package not in PACKAGE_LIMITS:
+        allowed = ", ".join(sorted({v for v in PACKAGE_ALIASES.values()}))
+        raise HTTPException(status_code=400, detail=f"Invalid package selected. Allowed: {allowed}")
 
     # ✅ Validate number of files
-    min_files, max_files = PACKAGE_LIMITS[package]
+    min_files, max_files = PACKAGE_LIMITS[normalized_package]
     if not (min_files <= len(files) <= max_files):
         raise HTTPException(
             status_code=400,
@@ -601,7 +623,7 @@ async def upload_photos(
     try:
         # Create a new order
         order = Order(
-            package=package,
+            package=normalized_package,
             add_ons=add_ons,
             user_id=(current_user.id if current_user else None)
         )
