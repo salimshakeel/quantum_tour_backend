@@ -586,16 +586,16 @@ async def upload_photos(
 ):
     print("[UPLOAD] Endpoint called ✅")
 
-    # if package not in PACKAGE_LIMITS:
-    #     raise HTTPException(status_code=400, detail="Invalid package selected")
+    if package not in PACKAGE_LIMITS:
+        raise HTTPException(status_code=400, detail="Invalid package selected")
 
-    # # ✅ Validate number of files
-    # min_files, max_files = PACKAGE_LIMITS[package]
-    # if not (min_files <= len(files) <= max_files):
-    #     raise HTTPException(
-    #         status_code=400,
-    #         detail=f"{package} allows {min_files}-{max_files} photos"
-    #     )
+    # ✅ Validate number of files
+    min_files, max_files = PACKAGE_LIMITS[package]
+    if not (min_files <= len(files) <= max_files):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{package} allows {min_files}-{max_files} photos"
+        )
 
     db = SessionLocal()
     try:
