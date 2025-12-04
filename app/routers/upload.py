@@ -73,12 +73,29 @@ def slugify_path_component(name: Optional[str]) -> str:
     s = s.strip("._-")
     return s or ""
 
-# Initialize SDK client only if not in mock mode
+def build_agent_folder_name(display_name: Optional[str]) -> str:
+    """
+    Builds a safe folder name for an agent (user) in Dropbox.
+    Prefers the user's name if available, otherwise falls back to a generic user ID.
+    """
+    if not display_name:
+        return "user_unknown"
+    return slugify_path_component(display_name)
+
+# Initialize SDK client lazily to avoid stale envs during reloads
 client: Optional[RunwayML] = None
-if not USE_MOCK_RUNWAY:
-    if not RUNWAY_API_KEY:
-        raise RuntimeError("Runway API key missing. Set RUNWAYML_API_SECRET or RUNWAY_API_KEY.")
-    client = RunwayML(api_key=RUNWAY_API_KEY)
+
+def get_runway_client() -> RunwayML:
+    global client
+    if USE_MOCK_RUNWAY:
+        raise RuntimeError("Mock mode enabled; Runway client is not used.")
+    if client is None:
+        api_key = os.getenv("RUNWAYML_API_SECRET") or os.getenv("RUNWAY_API_KEY")
+        if not api_key:
+            raise RuntimeError("Runway API key missing. Set RUNWAYML_API_SECRET or RUNWAY_API_KEY.")
+        print(f"[RUNWAY] Initializing SDK client; model={RUNWAY_MODEL}")
+        client = RunwayML(api_key=api_key)
+    return client
 
 
 # ---------------- IMAGE OPTIMIZATION ----------------
@@ -199,15 +216,17 @@ def poll_runway_status(task_id: str, max_checks: int = 30, interval_seconds: int
                 try:
                     if getattr(video, "user_id", None):
                         u = db.query(User).filter(User.id == video.user_id).first()
-                        display = (u.name or u.email or f"user_{u.id}") if u else None
-                        user_folder = slugify_path_component(display)
+                        display = (
+                            (u.email.split("@")[0]) if (u and getattr(u, "email", None)) else (u.name or f"user_{u.id}")
+                        ) if u else None
+                        agent_folder = build_agent_folder_name(display)
                 except Exception:
                     user_folder = ""
 
                 video.status = "succeeded"
                 file_name = f"video_{video.id}.mp4"
                 dropbox_like_path = (
-                    f"/quantumtour/videos/{user_folder}/{file_name}" if user_folder else f"/quantumtour/videos/{file_name}"
+                    f"/quantumtour/{user_folder}/video output/{file_name}" if user_folder else f"/quantumtour/video output/{file_name}"
                 )
                 video.video_url = f"dropbox://{dropbox_like_path}"
                 db.commit()
@@ -242,14 +261,16 @@ def poll_runway_status(task_id: str, max_checks: int = 30, interval_seconds: int
                         try:
                             if getattr(video, "user_id", None):
                                 u = db.query(User).filter(User.id == video.user_id).first()
-                                display = (u.name or u.email or f"user_{u.id}") if u else None
-                                user_folder = slugify_path_component(display)
+                                display = (
+                                    (u.email.split("@")[0]) if (u and getattr(u, "email", None)) else (u.name or f"user_{u.id}")
+                                ) if u else None
+                                agent_folder = build_agent_folder_name(display)
                         except Exception:
                             user_folder = ""
 
                         file_name = f"video_{video.id}.mp4"
                         dropbox_path = (
-                            f"/quantumtour/videos/{user_folder}/{file_name}" if user_folder else f"/quantumtour/videos/{file_name}"
+                            f"/quantumtour/{user_folder}/video output/{file_name}" if user_folder else f"/quantumtour/video output/{file_name}"
                         )
                         try:
                             if upload_video_to_dropbox(output_url, dropbox_path):
@@ -331,7 +352,8 @@ def upload_video_to_dropbox(video_url: str, dropbox_path: str) -> bool:
         dbx = dropbox.Dropbox(
             app_key=DROPBOX_APP_KEY,
             app_secret=DROPBOX_APP_SECRET,
-            oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
+            oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
+            timeout=300
         )
 
         print(f"[DEBUG] Downloading video from URL → {video_url}")
@@ -339,20 +361,19 @@ def upload_video_to_dropbox(video_url: str, dropbox_path: str) -> bool:
         resp.raise_for_status()
         video_bytes = resp.content
 
-        # Ensure destination folder exists
-        try:
-            parts = [p for p in dropbox_path.strip("/").split("/")[:-1] if p]
-            folder_path = ("/" + "/".join(parts)) if parts else None
-            if folder_path:
-                try:
-                    dbx.files_create_folder_v2(folder_path)
-                except ApiError:
-                    pass  # likely already exists; ignore
-        except Exception:
-            pass
+        # Folders are pre-created in Dropbox; do not attempt to create them here
 
         print(f"[DEBUG] Uploading video to Dropbox → {dropbox_path}")
-        dbx.files_upload(video_bytes, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+        last_err = None
+        for attempt in range(1, 4):
+            try:
+                dbx.files_upload(video_bytes, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+                break
+            except Exception as e:
+                last_err = e
+                print(f"[WARN] Video upload attempt {attempt} failed: {e}")
+                if attempt == 3:
+                    raise
 
         print(f"[OK] Uploaded successfully to Dropbox → {dropbox_path}")
         return True
@@ -379,26 +400,26 @@ def upload_image_to_dropbox(image_path: str, dropbox_path: str) -> bool:
         dbx = dropbox.Dropbox(
             app_key=DROPBOX_APP_KEY,
             app_secret=DROPBOX_APP_SECRET,
-            oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
+            oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
+            timeout=300
         )
 
         with open(image_path, "rb") as f:
             img_bytes = f.read()
 
-        # Ensure destination folder exists
-        try:
-            parts = [p for p in dropbox_path.strip("/").split("/")[:-1] if p]
-            folder_path = ("/" + "/".join(parts)) if parts else None
-            if folder_path:
-                try:
-                    dbx.files_create_folder_v2(folder_path)
-                except ApiError:
-                    pass  # likely already exists; ignore
-        except Exception:
-            pass
+        # Folders are pre-created in Dropbox; do not attempt to create them here
 
         print(f"[DEBUG] Uploading image to Dropbox → {dropbox_path}")
-        dbx.files_upload(img_bytes, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+        last_err = None
+        for attempt in range(1, 4):
+            try:
+                dbx.files_upload(img_bytes, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+                break
+            except Exception as e:
+                last_err = e
+                print(f"[WARN] Image upload attempt {attempt} failed: {e}")
+                if attempt == 3:
+                    raise
 
         print(f"[OK] Uploaded image successfully → {dropbox_path}")
         return True
@@ -425,8 +446,10 @@ def process_videos_for_order(order_id: int, file_paths: list, reorder_user_id: O
         try:
             if resolved_user_id:
                 user = db.query(User).filter(User.id == resolved_user_id).first()
-                display = (user.name or user.email or f"user_{user.id}") if user else None
-                user_folder = slugify_path_component(display)
+                display = (
+                    (user.email.split("@")[0]) if (user and getattr(user, "email", None)) else (user.name or f"user_{user.id}")
+                ) if user else None
+                user_folder = build_agent_folder_name(display)
         except Exception:
             user_folder = ""
 
@@ -467,13 +490,15 @@ def process_videos_for_order(order_id: int, file_paths: list, reorder_user_id: O
             data_url = f"data:image/jpeg;base64,{image_b64}"
 
             # RunwayML video generation
+            print(f"[RUNWAY] mock={USE_MOCK_RUNWAY} key_present={bool(RUNWAY_API_KEY)} model={RUNWAY_MODEL}")
             if USE_MOCK_RUNWAY:
                 video_filename = f"mock_{img_row.id}.mp4"
                 video_url, task_id, status = None, f"mock-job-{int(datetime.utcnow().timestamp())}", "succeeded"
             else:
                 try:
                     print(f"[STEP] Sending request to RunwayML for {filename}")
-                    task = client.image_to_video.create(
+                    sdk = get_runway_client()
+                    task = sdk.image_to_video.create(
                         model=RUNWAY_MODEL,
                         prompt_image=data_url,
                         prompt_text=prompt_text,
@@ -492,7 +517,7 @@ def process_videos_for_order(order_id: int, file_paths: list, reorder_user_id: O
                         f"reorder_{reorder_user_id}_{img_row.id}.mp4" if reorder_user_id else f"video_{img_row.id}.mp4"
                     )
                     dropbox_path = (
-                        f"/quantumtour/videos/{user_folder}/{file_name}" if user_folder else f"/quantumtour/videos/{file_name}"
+                        f"/quantumtour/{user_folder}/video output/{file_name}" if user_folder else f"/quantumtour/video output/{file_name}"
                     )
                     upload_success = upload_video_to_dropbox(video_url, dropbox_path)
 
@@ -561,16 +586,16 @@ async def upload_photos(
 ):
     print("[UPLOAD] Endpoint called ✅")
 
-    if package not in PACKAGE_LIMITS:
-        raise HTTPException(status_code=400, detail="Invalid package selected")
+    # if package not in PACKAGE_LIMITS:
+    #     raise HTTPException(status_code=400, detail="Invalid package selected")
 
-    # ✅ Validate number of files
-    min_files, max_files = PACKAGE_LIMITS[package]
-    if not (min_files <= len(files) <= max_files):
-        raise HTTPException(
-            status_code=400,
-            detail=f"{package} allows {min_files}-{max_files} photos"
-        )
+    # # ✅ Validate number of files
+    # min_files, max_files = PACKAGE_LIMITS[package]
+    # if not (min_files <= len(files) <= max_files):
+    #     raise HTTPException(
+    #         status_code=400,
+    #         detail=f"{package} allows {min_files}-{max_files} photos"
+    #     )
 
     db = SessionLocal()
     try:
@@ -591,7 +616,11 @@ async def upload_photos(
         user_display = None
         try:
             if current_user:
-                user_display = current_user.name or current_user.email or (f"user_{current_user.id}" if getattr(current_user, "id", None) else None)
+                user_display = (
+                    current_user.email.split("@")[0] if getattr(current_user, "email", None) else (
+                        current_user.name or (f"user_{current_user.id}" if getattr(current_user, "id", None) else None)
+                    )
+                )
         except Exception:
             user_display = None
         user_folder = slugify_path_component(user_display)
@@ -606,7 +635,7 @@ async def upload_photos(
 
                 # Upload to Dropbox immediately
                 dropbox_path = (
-                    f"/quantumtour/images/{user_folder}/{file.filename}" if user_folder else f"/quantumtour/images/{file.filename}"
+                    f"/quantumtour/{user_folder}/uploaded images/{file.filename}" if user_folder else f"/quantumtour/uploaded images/{file.filename}"
                 )
                 # Queue Dropbox upload in background to return response faster
                 background_tasks.add_task(upload_image_to_dropbox, dst_path, dropbox_path)
@@ -766,36 +795,29 @@ def submit_feedback(payload: FeedbackPayload):
         ratio = "1280:720" if w >= h else "720:1280"
 
         # 7) Generate new video via Runway
-        if USE_MOCK_RUNWAY:
-            video_filename = f"mock_{image.id}_{int(datetime.utcnow().timestamp())}.mp4"
-            video_path = os.path.join(VIDEOS_DIR, video_filename)
-            with open(video_path, "wb") as vf:
-                vf.write(b"")
-            video_url = None
-            task_id = f"mock-job-{int(datetime.utcnow().timestamp())}"
-            status = "succeeded"
-        else:
-            task = client.image_to_video.create(
-                model=RUNWAY_MODEL,
-                prompt_image=data_url,
-                prompt_text=new_prompt,
-                duration=5,
-                ratio=ratio,
-            ).wait_for_task_output()
+        print(f"[RUNWAY] mock={USE_MOCK_RUNWAY} key_present={bool(RUNWAY_API_KEY)} model={RUNWAY_MODEL}")
+        sdk = get_runway_client()
+        task = sdk.image_to_video.create(
+            model=RUNWAY_MODEL,
+            prompt_image=data_url,
+            prompt_text=new_prompt,
+            duration=5,
+            ratio=ratio,
+        ).wait_for_task_output()
 
-            if not task.output:
-                raise HTTPException(status_code=500, detail="RunwayML did not return a video")
+        if not task.output:
+            raise HTTPException(status_code=500, detail="RunwayML did not return a video")
 
-            video_url = task.output[0]
-            task_id = task.id
-            status = "succeeded"
+        video_url = task.output[0]
+        task_id = task.id
+        status = "succeeded"
 
-            video_filename = f"video_{image.id}_{int(datetime.utcnow().timestamp())}.mp4"
-            video_path = os.path.join(VIDEOS_DIR, video_filename)
-            resp = requests.get(video_url, timeout=300)
-            resp.raise_for_status()
-            with open(video_path, "wb") as vf:
-                vf.write(resp.content)
+        video_filename = f"video_{image.id}_{int(datetime.utcnow().timestamp())}.mp4"
+        video_path = os.path.join(VIDEOS_DIR, video_filename)
+        resp = requests.get(video_url, timeout=300)
+        resp.raise_for_status()
+        with open(video_path, "wb") as vf:
+            vf.write(resp.content)
 
         # 8) Create child Video row
         # Derive user for child video: prefer parent.user_id, else from order fallbacks

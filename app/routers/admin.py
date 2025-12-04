@@ -14,6 +14,7 @@ from app.services.runway_service import generate_video
 from datetime import timedelta
 import dropbox
 from app.routers.auth import get_current_user
+from app.routers.upload import build_agent_folder_name
 from app.models.database import SessionLocal
 import dropbox, time, os, tempfile, shutil
 import re
@@ -436,7 +437,11 @@ async def admin_upload_final_video(
             app_secret=os.getenv("DROPBOX_APP_SECRET"),
             oauth2_refresh_token=os.getenv("DROPBOX_REFRESH_TOKEN"),
         )
-        dropbox_path = f"/final_videos/{filename}"
+        # Build agent folder name: '<Display Name> (Agent Name)'
+        user = db.query(User).filter(User.id == user_id).first()
+        display = (user.name or user.email or f"user_{user_id}") if user else f"user_{user_id}"
+        agent_folder = build_agent_folder_name(display)
+        dropbox_path = f"/Quantumtour/{agent_folder}/Final Edited Video (Editor)/{filename}"
         with open(temp_path, "rb") as f:
             dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode("overwrite"))
 

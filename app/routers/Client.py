@@ -9,6 +9,7 @@ from app.routers.upload import IMAGES_DIR, process_videos_for_order, slugify_pat
 from app.config import STRIPE_SECRET_KEY
 import stripe
 stripe.api_key = STRIPE_SECRET_KEY
+import re
 
 from app.models.database import SessionLocal, Order, UploadedImage, Video, Invoice, User , Payment, FinalVideo
 
@@ -446,11 +447,12 @@ def get_client_invoices(
 
     return {"user": current_user.email, "invoices": response}
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from dotenv import load_dotenv
 import os
 import dropbox
 from datetime import datetime
+import json
 
 # Load environment variables
 load_dotenv()
@@ -458,7 +460,7 @@ load_dotenv()
 DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
 DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
-DROPBOX_FOLDER_PATH = "/quantumtour/brand_assets"
+DROPBOX_FOLDER_PATH = "/quantumtour"
 
 
 
@@ -480,55 +482,166 @@ def get_dropbox_access_token():
 @router.post("/brand_assets")
 async def upload_brand_asset(
     file: UploadFile = File(...),
+    primary_color: Optional[str] = Form(None),
+    font_family: Optional[str] = Form(None),
+    # Accept common camelCase variants from some frontends
+    primaryColor: Optional[str] = Form(None),
+    fontFamily: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user)
 ):
     """
     Upload a brand logo to Dropbox and return the shareable URL.
     """
     try:
+        # Normalize possible camelCase field names to snake_case
+        if not primary_color and primaryColor:
+            primary_color = primaryColor
+        if not font_family and fontFamily:
+            font_family = fontFamily
+
+        # Sanitize/normalize color into #RRGGBB if possible
+        def _rgb_to_hex(rgb: str) -> Optional[str]:
+            m = re.match(r"rgb\\(\\s*(\\d{1,3})\\s*,\\s*(\\d{1,3})\\s*,\\s*(\\d{1,3})\\s*\\)", rgb, flags=re.IGNORECASE)
+            if not m:
+                return None
+            r, g, b = (max(0, min(255, int(x))) for x in m.groups())
+            return f"#{r:02x}{g:02x}{b:02x}"
+
+        if isinstance(primary_color, str):
+            pc = primary_color.strip()
+            if pc.lower().startswith("rgb"):
+                hex_pc = _rgb_to_hex(pc)
+                if hex_pc:
+                    primary_color = hex_pc
+            elif re.fullmatch(r"#?[0-9a-fA-F]{6}", pc):
+                primary_color = pc if pc.startswith("#") else f"#{pc}"
+            # else leave as-is; Dropbox JSON will store what we received
+
+        # Debug log to quickly verify what server received
+        print(f"[BrandAssets] Received → primary_color={primary_color}, font_family={font_family}, file={getattr(file, 'filename', None)}")
+
         # Initialize Dropbox client using refresh token (long-lived)
         if not all([DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN]):
             raise HTTPException(status_code=500, detail="Missing Dropbox credentials in environment")
         dbx = dropbox.Dropbox(
             app_key=DROPBOX_APP_KEY,
             app_secret=DROPBOX_APP_SECRET,
-            oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
+            oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
+            timeout=300
         )
 
-        # Build client folder from user's name/email
-        display = current_user.name or current_user.email or f"user_{current_user.id}"
-        user_folder = slugify_path_component(display)
-        dropbox_path = f"{DROPBOX_FOLDER_PATH}/{user_folder}/{file.filename}"
+        # Build agent folder from user's email local-part, else name, else user_{id}
+        if current_user and getattr(current_user, "email", None):
+            agent_folder = current_user.email.split("@")[0]
+        else:
+            agent_folder = (current_user.name if getattr(current_user, "name", None) else f"user_{current_user.id}")
+        base_folder = f"{DROPBOX_FOLDER_PATH}/{agent_folder}/brand_assets"
+        dropbox_path = f"{base_folder}/{file.filename}"
 
-        # Ensure destination folder exists: /quantumtour/brand_assets and then client subfolder
+        # Ensure destination folder exists: /quantumtour/{agent}/brand_assets
+        # Agent folder should already exist; create only the brand_assets subfolder
         try:
-            base_folder = DROPBOX_FOLDER_PATH  # /quantumtour/brand_assets
             dbx.files_create_folder_v2(base_folder)
         except dropbox.exceptions.ApiError:
             pass  # likely exists
-        try:
-            folder_path = f"{DROPBOX_FOLDER_PATH}/{user_folder}"
-            dbx.files_create_folder_v2(folder_path)
-        except dropbox.exceptions.ApiError:
-            pass  # likely exists
 
-        # Upload the file
+        # Upload the file with retries
         file_bytes = file.file.read()
-        dbx.files_upload(file_bytes, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+        last_err = None
+        for attempt in range(1, 4):
+            try:
+                dbx.files_upload(file_bytes, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+                break
+            except Exception as e:
+                last_err = e
+                print(f"[BrandAssets] Upload attempt {attempt} failed: {e}")
+                if attempt == 3:
+                    raise
 
         # Obtain a temporary link (does not require sharing scopes)
         public_url = None
         try:
-            tmp = dbx.files_get_temporary_link(dropbox_path)
-            public_url = tmp.link
+            tmp = None
+            for attempt in range(1, 3):
+                try:
+                    tmp = dbx.files_get_temporary_link(dropbox_path)
+                    break
+                except Exception as e:
+                    print(f"[BrandAssets] Temp link attempt {attempt} failed: {e}")
+                    if attempt == 2:
+                        raise
+            public_url = tmp.link if tmp else None
         except dropbox.exceptions.ApiError:
             public_url = None
+
+        # Update or create branding.json alongside the asset with color/font metadata
+        branding_json_path = f"{base_folder}/branding.json"
+        branding = {
+            "primary_color": None,
+            "font_family": None,
+            "logos": []
+        }
+        try:
+            md, res = None, None
+            for attempt in range(1, 3):
+                try:
+                    md, res = dbx.files_download(branding_json_path)
+                    break
+                except dropbox.exceptions.ApiError as e:
+                    # likely not found; treat as new branding
+                    md, res = None, None
+                    break
+                except Exception as e:
+                    print(f"[BrandAssets] Download branding.json attempt {attempt} failed: {e}")
+                    if attempt == 2:
+                        raise
+            if res and getattr(res, "content", None):
+                existing = res.content.decode("utf-8")
+                branding = json.loads(existing)
+                if not isinstance(branding, dict):
+                    branding = {"primary_color": None, "font_family": None, "logos": []}
+        except dropbox.exceptions.ApiError:
+            # file may not exist yet; proceed with default branding
+            pass
+
+        # Set metadata if provided (keep existing otherwise)
+        if primary_color:
+            branding["primary_color"] = primary_color
+        if font_family:
+            branding["font_family"] = font_family
+
+        # Append uploaded logo reference
+        branding.setdefault("logos", [])
+        branding["logos"].append({
+            "path": dropbox_path,
+            "filename": file.filename,
+            "uploaded_at": datetime.utcnow().isoformat()
+        })
+
+        # Upload/overwrite branding.json
+        branding_bytes = json.dumps(branding, ensure_ascii=False, indent=2).encode("utf-8")
+        last_err = None
+        for attempt in range(1, 3):
+            try:
+                dbx.files_upload(
+                    branding_bytes,
+                    branding_json_path,
+                    mode=dropbox.files.WriteMode.overwrite
+                )
+                break
+            except Exception as e:
+                last_err = e
+                print(f"[BrandAssets] Upload branding.json attempt {attempt} failed: {e}")
+                if attempt == 2:
+                    raise
 
         return {
             "message": "✅ Brand asset uploaded successfully!",
             "file_name": file.filename,
             "dropbox_path": dropbox_path,
             "dropbox_url": public_url,
+            "branding_json_path": branding_json_path,
+            "branding": branding,
             "uploaded_at": datetime.utcnow().isoformat()
         }
 
