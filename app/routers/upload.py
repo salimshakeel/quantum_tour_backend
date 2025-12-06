@@ -26,9 +26,27 @@ from app.services.prompt_generator import (
     improve_prompt_with_feedback,
 )
 PACKAGE_LIMITS = {
-    "Starter": (5, 10),
-    "Professional": (11, 20),
-    "Premium": (21, 30)
+    # Frontend package names
+    "Express": (5, 10),
+    "Quick": (11, 20),
+    "Standered": (21, 30),  # keep UI spelling
+    "Pro": (21, 30),
+    "Ultra": (21, 30),
+    
+}
+
+
+# Accept common variants/casing
+PACKAGE_ALIASES = {
+    "express": "Express",
+    "quick": "Quick",
+    "standered": "Standered",
+    "standard": "Standered",  # alias to UI spelling
+    "pro": "Pro",
+    "ultra": "Ultra",
+    "starter": "Starter",
+    "professional": "Professional",
+    "premium": "Premium",
 }
 
 # ----------------------- SETUP -----------------------
@@ -80,6 +98,15 @@ if not USE_MOCK_RUNWAY:
         raise RuntimeError("Runway API key missing. Set RUNWAYML_API_SECRET or RUNWAY_API_KEY.")
     client = RunwayML(api_key=RUNWAY_API_KEY)
 
+
+def build_agent_folder_name(display_name: Optional[str]) -> str:
+    """
+    Builds a safe folder name for an agent (user) in Dropbox.
+    Prefers the user's name if available, otherwise falls back to a generic user ID.
+    """
+    if not display_name:
+        return "user_unknown"
+    return slugify_path_component(display_name)
 
 # ---------------- IMAGE OPTIMIZATION ----------------
 def optimize_image_for_runway(image_path: str, max_width: int = 1024, max_height: int = 1024) -> str:
@@ -206,7 +233,9 @@ def poll_runway_status(task_id: str, max_checks: int = 30, interval_seconds: int
 
                 video.status = "succeeded"
                 file_name = f"video_{video.id}.mp4"
-                dropbox_like_path = f"/videos/{user_folder}/{file_name}" if user_folder else f"/videos/{file_name}"
+                dropbox_like_path = (
+                        f"/quantumtour/{user_folder}/video output/{file_name}" if user_folder else f"/quantumtour/video output/{file_name}"
+                    )
                 video.video_url = f"dropbox://{dropbox_like_path}"
                 db.commit()
                 try:
@@ -246,7 +275,9 @@ def poll_runway_status(task_id: str, max_checks: int = 30, interval_seconds: int
                             user_folder = ""
 
                         file_name = f"video_{video.id}.mp4"
-                        dropbox_path = f"/videos/{user_folder}/{file_name}" if user_folder else f"/videos/{file_name}"
+                        dropbox_path = (
+                            f"/quantumtour/{user_folder}/video output/{file_name}" if user_folder else f"/quantumtour/video output/{file_name}"
+                        )
                         try:
                             if upload_video_to_dropbox(output_url, dropbox_path):
                                 final_url = f"dropbox://{dropbox_path}"
@@ -600,7 +631,7 @@ async def upload_photos(
 
                 # Upload to Dropbox immediately
                 dropbox_path = (
-                    f"/images/{user_folder}/{file.filename}" if user_folder else f"/images/{file.filename}"
+                    f"/quantumtour/{user_folder}/uploaded images/{file.filename}" if user_folder else f"/quantumtour/uploaded images/{file.filename}"
                 )
                 upload_success = upload_image_to_dropbox(dst_path, dropbox_path)
                 if upload_success:
