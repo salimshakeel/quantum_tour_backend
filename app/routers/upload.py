@@ -518,7 +518,7 @@ def process_videos_for_order(order_id: int, file_paths: list, reorder_user_id: O
                     file_name = (
                         f"reorder_{reorder_user_id}_{img_row.id}.mp4" if reorder_user_id else f"video_{img_row.id}.mp4"
                     )
-                    dropbox_path = f"/videos/{user_folder}/{file_name}" if user_folder else f"/videos/{file_name}"
+                    dropbox_path = f"/quantumtour/{user_folder}/video output/{file_name}" if user_folder else f"/quantumtour/video output/{file_name}"
                     upload_success = upload_video_to_dropbox(video_url, dropbox_path)
 
                     if upload_success:
