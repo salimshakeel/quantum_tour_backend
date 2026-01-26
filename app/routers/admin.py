@@ -14,7 +14,7 @@ from app.services.runway_service import generate_video
 from datetime import timedelta
 import dropbox
 from app.routers.auth import get_current_user
-from app.routers.upload import build_agent_folder_name
+from app.routers.upload import build_agent_folder_name, slugify_path_component
 from app.models.database import SessionLocal
 import dropbox, time, os, tempfile, shutil
 import re
@@ -87,6 +87,40 @@ def _user_from_video(db: Session, v: Video) -> User | None:
     except Exception:
         return None
     return None
+
+
+def _extract_dropbox_user_folder(video_url: str | None) -> str | None:
+    """
+    Extract the Dropbox 'user_folder' used by the Runway pipeline.
+
+    We store URLs like:
+      - dropbox:///quantumtour/<user_folder>/video output/video_<id>.mp4
+      - dropbox:///quantumtour/video output/video_<id>.mp4  (no folder / guest)
+
+    Returns the folder string when present; otherwise None.
+    """
+    try:
+        if not video_url or not isinstance(video_url, str):
+            return None
+        if not video_url.startswith("dropbox://"):
+            return None
+
+        path = video_url[len("dropbox://") :]
+        parts = [p for p in path.split("/") if p]
+        if len(parts) < 2:
+            return None
+
+        # Expect quantumtour root (case-insensitive)
+        if parts[0].lower() != "quantumtour":
+            return None
+
+        # If next part is "video output" then there is no user folder
+        if parts[1].strip().lower() == "video output":
+            return None
+
+        return parts[1]
+    except Exception:
+        return None
 # ---------------- ADMIN: VIDEOS LISTING ----------------
 @router.get("/admin/videos", tags=["Admin Portal"])
 def list_videos():
@@ -141,7 +175,7 @@ def get_order_status():
         # ✅ Join Orders with Users to fetch email directly
         orders_with_users = (
             db.query(Order, User)
-            .join(User, Order.user_id == User.id)
+            .outerjoin(User, Order.user_id == User.id)
             .order_by(Order.created_at.desc())
             .all()
         )
@@ -187,12 +221,31 @@ def get_order_status():
             else:
                 status = "submitted"
 
+            # Compute the Dropbox folder name (same logic as upload.py uses)
+            display_name = (user.name or user.email or f"user_{user.id}") if user else None
+            computed_dropbox_folder = slugify_path_component(display_name) if display_name else None
+
+            # Try to extract actual folder from existing video URLs, fallback to computed
+            actual_dropbox_folder = next(
+                (
+                    f
+                    for f in (
+                        _extract_dropbox_user_folder(v.video_url)
+                        for v in image_id_to_video.values()
+                    )
+                    if f
+                ),
+                computed_dropbox_folder,
+            )
+
             response.append({
                 "order_id": order.id,
-                "user_id": user.id,
-                "user_email": user.email,
-                "user_name": user.name,
+                "user_id": (user.id if user else None),
+                "user_email": (user.email if user else None),
+                "user_name": (user.name if user else "Guest User"),
                 "user_code": _format_user_code(user),
+                # This is the folder name used in Dropbox (matches user name/email)
+                "dropbox_username": actual_dropbox_folder,
                 "package": order.package,
                 "add_ons": order.add_ons,
                 "photos": photo_count,
@@ -203,6 +256,9 @@ def get_order_status():
                         "filename": (v.video_path.split("/")[-1] if v.video_path else None),
                         "download_filename": f"video_{v.id}.mp4",
                         "url": v.video_url or "",
+                        "dropbox_username": (
+                            _extract_dropbox_user_folder(v.video_url) or computed_dropbox_folder
+                        ),
                         "status": v.status
                     }
                     for v in image_id_to_video.values()

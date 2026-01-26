@@ -7,7 +7,15 @@ import os
 from sqlalchemy import Column, LargeBinary
 SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL")
 
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
+# Add connection pool settings and timeout for remote databases
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL,
+    pool_pre_ping=True,  # Check connection before using
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    connect_args={"connect_timeout": 10}  # 10 second connection timeout
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
