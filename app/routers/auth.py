@@ -17,8 +17,15 @@ router = APIRouter(tags=["Auth"])
 
 # ---------------- CONFIG ----------------
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-SECRET_KEY = os.getenv("SECRET_KEY", "your_secret_key")  # use strong secret in .env
-REFRESH_SECRET_KEY = os.getenv("REFRESH_SECRET_KEY", "your_refresh_secret")
+SECRET_KEY = os.getenv("SECRET_KEY")
+REFRESH_SECRET_KEY = os.getenv("REFRESH_SECRET_KEY")
+
+# Validate required secrets at startup
+if not SECRET_KEY:
+    raise ValueError("SECRET_KEY environment variable is required for JWT authentication")
+if not REFRESH_SECRET_KEY:
+    raise ValueError("REFRESH_SECRET_KEY environment variable is required for JWT refresh tokens")
+
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
@@ -332,7 +339,3 @@ def reset_password(token: str = Body(...), new_password: str = Body(...), db: Se
     del RESET_TOKENS[token]
 
     return {"message": "Password has been reset successfully."}
-
-print ("hello world")
-
-

@@ -8,12 +8,16 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
 from app.models.database import SessionLocal, Admin  # Your DB model
+import os
 
 # Router for authentication
 router = APIRouter(tags=["Admin Auth"])
 
 # ---------------- CONFIG ----------------
-SECRET_KEY = "your-secret-key"  # TODO: move to .env for security
+SECRET_KEY = os.getenv("ADMIN_SECRET_KEY")
+if not SECRET_KEY:
+    raise ValueError("ADMIN_SECRET_KEY environment variable is required for admin authentication")
+
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 REFRESH_TOKEN_EXPIRE_DAYS = 7

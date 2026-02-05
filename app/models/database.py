@@ -38,6 +38,11 @@ class Order(Base):
     parent_order_id = Column(Integer, nullable=True)  
     # 👆 if this is a reorder, link back to original order (FK constraint removed for SQLite compatibility)
 
+    # Processing status fields to prevent duplicate video generation
+    is_processing = Column(Boolean, default=False)  # True while videos are being generated
+    processed_at = Column(DateTime(timezone=True), nullable=True)  # Set when processing completes
+    processing_started_at = Column(DateTime(timezone=True), nullable=True)  # Set when processing starts
+
     # Relationships
     images = relationship("UploadedImage", back_populates="order")
     invoice = relationship("Invoice", back_populates="order", uselist=False)

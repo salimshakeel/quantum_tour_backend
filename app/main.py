@@ -51,20 +51,4 @@ app.add_middleware(
 )
 
 
-# Load env
-load_dotenv()
-api_key = os.getenv("OPENAI_API_KEY")
-print("Loaded API key:", api_key)
 
-def print_openai_credentials():
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    project_id = os.getenv("OPENAI_PROJECT", "").strip()
-
-    if not api_key or not project_id:
-        print("❌ OpenAI credentials missing! Set OPENAI_API_KEY and OPENAI_PROJECT.")
-    else:
-        print("✅ Loaded OpenAI credentials:")
-        print(f"API key: {api_key[:8]}...{api_key[-8:]}")
-        print(f"Project ID: {project_id}")
-
-print_openai_credentials()

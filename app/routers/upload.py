@@ -444,6 +444,32 @@ def process_videos_for_order(order_id: int, file_paths: list, reorder_user_id: O
             print(f"[ERROR] Order {order_id} not found")
             return
 
+        # ==================== DUPLICATE PROTECTION ====================
+        # Check if order is already being processed or was already processed
+        if order.is_processing:
+            print(f"[SKIP] Order {order_id} is already being processed. Skipping to prevent duplicates.")
+            return
+        
+        if order.processed_at is not None:
+            print(f"[SKIP] Order {order_id} was already processed at {order.processed_at}. Skipping to prevent duplicates.")
+            return
+        
+        # Check if videos already exist for this order
+        existing_videos = db.query(Video).join(UploadedImage).filter(
+            UploadedImage.order_id == order_id
+        ).count()
+        
+        if existing_videos > 0:
+            print(f"[SKIP] Order {order_id} already has {existing_videos} videos. Skipping to prevent duplicates.")
+            return
+        
+        # Mark order as processing
+        order.is_processing = True
+        order.processing_started_at = datetime.utcnow()
+        db.commit()
+        print(f"[LOCK] Order {order_id} marked as processing")
+        # ==============================================================
+
         # Resolve a user once per order if possible
         resolved_user_id = resolve_user_for_order(db, order)
 
@@ -571,7 +597,25 @@ def process_videos_for_order(order_id: int, file_paths: list, reorder_user_id: O
                 except Exception:
                     pass
 
+        # ==================== MARK ORDER AS PROCESSED ====================
+        order.is_processing = False
+        order.processed_at = datetime.utcnow()
+        db.commit()
+        print(f"[UNLOCK] Order {order_id} marked as processed")
+        # =================================================================
+
         print(f"[OK] Finished background processing for order {order_id}")
+    except Exception as processing_error:
+        # If processing fails, unlock the order so it can be retried
+        try:
+            order = db.query(Order).filter(Order.id == order_id).first()
+            if order:
+                order.is_processing = False
+                db.commit()
+                print(f"[UNLOCK] Order {order_id} unlocked after error: {processing_error}")
+        except Exception:
+            pass
+        raise
     finally:
         db.close()
         
@@ -586,22 +630,50 @@ async def upload_photos(
 ):
     print("[UPLOAD] Endpoint called ✅")
 
-    if package not in PACKAGE_LIMITS:
-        raise HTTPException(status_code=400, detail="Invalid package selected")
+    # Normalize package name using aliases (handles "Standard" -> "Standered", case variations, etc.)
+    normalized_package = PACKAGE_ALIASES.get(package.lower(), package)
+    
+    if normalized_package not in PACKAGE_LIMITS:
+        raise HTTPException(status_code=400, detail=f"Invalid package selected: {package}")
 
     # ✅ Validate number of files
-    min_files, max_files = PACKAGE_LIMITS[package]
+    min_files, max_files = PACKAGE_LIMITS[normalized_package]
     if not (min_files <= len(files) <= max_files):
         raise HTTPException(
             status_code=400,
-            detail=f"{package} allows {min_files}-{max_files} photos"
+            detail=f"{normalized_package} allows {min_files}-{max_files} photos"
         )
 
     db = SessionLocal()
     try:
+        # ==================== DUPLICATE SUBMISSION PROTECTION ====================
+        # Check if user has a recent order (within 60 seconds) with same package
+        # This prevents double-click submissions
+        if current_user:
+            from datetime import timedelta
+            recent_cutoff = datetime.utcnow() - timedelta(seconds=60)
+            recent_order = db.query(Order).filter(
+                Order.user_id == current_user.id,
+                Order.package == normalized_package,
+                Order.created_at >= recent_cutoff
+            ).first()
+            
+            if recent_order:
+                print(f"[DUPLICATE] User {current_user.id} already has recent order #{recent_order.id} for {normalized_package}")
+                # Return the existing order instead of creating a new one
+                return {
+                    "status": "success",
+                    "order_id": recent_order.id,
+                    "package": recent_order.package,
+                    "add_ons": recent_order.add_ons,
+                    "message": "Order already submitted. Processing in progress.",
+                    "duplicate_prevented": True
+                }
+        # ========================================================================
+
         # Create a new order
         order = Order(
-            package=package,
+            package=normalized_package,
             add_ons=add_ons,
             user_id=(current_user.id if current_user else None)
         )

@@ -205,6 +205,18 @@ async def handle_checkout_session_completed(session: Dict[str, Any], db):
                 new_order_id = int(md['order_id'])
                 user_id = int(md['user_id'])
                 new_order = db.query(Order).filter(Order.id == new_order_id).first()
+                
+                # ==================== DUPLICATE PROTECTION ====================
+                # Check if order is already being processed or was already processed
+                if new_order:
+                    if getattr(new_order, 'is_processing', False):
+                        print(f"[SKIP WEBHOOK] Order {new_order_id} is already being processed. Skipping duplicate webhook.")
+                        return
+                    if getattr(new_order, 'processed_at', None) is not None:
+                        print(f"[SKIP WEBHOOK] Order {new_order_id} was already processed. Skipping duplicate webhook.")
+                        return
+                # ==============================================================
+                
                 if new_order and new_order.parent_order_id:
                     old_images = db.query(UploadedImage).filter(UploadedImage.order_id == new_order.parent_order_id).all()
                     saved_files = []

@@ -14,7 +14,12 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 RUNWAY_API_KEY = os.getenv("RUNWAY_API_KEY")
 # Public API uses the dev host per Runway docs/error message
 RUNWAY_API_URL = os.getenv("RUNWAY_API_URL", "https://api.dev.runwayml.com/v1")
-SECRET_KEY = os.getenv("JWT_SECRET", "supersecretkey")
+
+# JWT Secret - Required for security
+SECRET_KEY = os.getenv("JWT_SECRET")
+if not SECRET_KEY:
+    raise ValueError("JWT_SECRET environment variable is required for secure authentication")
+
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60  # 1 hour
 
